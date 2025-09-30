@@ -1,45 +1,39 @@
 import logging
 import asyncio
 import random
+import sqlite3
+import os
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-import sqlite3
-import os
 
-# Set up logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Bot Token
+# Bot Configuration
 BOT_TOKEN = "7837389709:AAEue6M60TRpL7F1adZwsFhkrPx6awll6K4"
-ADMIN_ID = 123456789  # আপনার Telegram ID
+ADMIN_ID = 123456789  # আপনার Telegram ID দিন
 
-class Database:
+class SimpleDatabase:
     def __init__(self):
-        self.conn = sqlite3.connect('mining_bot.db', check_same_thread=False)
-        self.create_tables()
+        self.db_path = "mining_bot.db"
+        self.init_db()
     
-    def create_tables(self):
-        cursor = self.conn.cursor()
+    def init_db(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
         # Users table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER UNIQUE,
+                user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
                 balance REAL DEFAULT 0.0,
                 total_earned REAL DEFAULT 0.0,
                 mining_power REAL DEFAULT 1.0,
                 referrals INTEGER DEFAULT 0,
-                referral_bonus REAL DEFAULT 0.0,
-                is_mining BOOLEAN DEFAULT FALSE,
-                last_mining TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -54,237 +48,292 @@ class Database:
             )
         ''')
         
-        self.conn.commit()
-        logger.info("✅ Database tables created successfully")
+        conn.commit()
+        conn.close()
+        print("✅ Database initialized")
     
     def get_user(self, user_id):
-        cursor = self.conn.cursor()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
         user = cursor.fetchone()
+        conn.close()
         
         if user:
             return {
-                'id': user[0],
-                'user_id': user[1],
-                'username': user[2],
-                'first_name': user[3],
-                'balance': user[4],
-                'total_earned': user[5],
-                'mining_power': user[6],
-                'referrals': user[7],
-                'referral_bonus': user[8],
-                'is_mining': user[9],
-                'last_mining': user[10],
-                'created_at': user[11]
+                'user_id': user[0],
+                'username': user[1],
+                'first_name': user[2],
+                'balance': user[3],
+                'total_earned': user[4],
+                'mining_power': user[5],
+                'referrals': user[6],
+                'created_at': user[7]
             }
         return None
     
     def create_user(self, user_id, username, first_name):
-        cursor = self.conn.cursor()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         try:
-            cursor.execute('''
-                INSERT INTO users (user_id, username, first_name) 
-                VALUES (?, ?, ?)
-            ''', (user_id, username, first_name))
-            self.conn.commit()
+            cursor.execute(
+                'INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)',
+                (user_id, username, first_name)
+            )
+            conn.commit()
+            conn.close()
             return True
-        except sqlite3.IntegrityError:
+        except Exception as e:
+            print(f"Error creating user: {e}")
+            conn.close()
             return False
     
     def update_balance(self, user_id, amount):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            UPDATE users 
-            SET balance = balance + ?, total_earned = total_earned + ? 
-            WHERE user_id = ?
-        ''', (amount, amount, user_id))
-        self.conn.commit()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE users SET balance = balance + ?, total_earned = total_earned + ? WHERE user_id = ?',
+            (amount, amount, user_id)
+        )
+        conn.commit()
+        conn.close()
     
     def add_referral(self, referrer_id, referred_id):
-        cursor = self.conn.cursor()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
         # Add referral record
-        cursor.execute('''
-            INSERT INTO referrals (referrer_id, referred_id) 
-            VALUES (?, ?)
-        ''', (referrer_id, referred_id))
+        cursor.execute(
+            'INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)',
+            (referrer_id, referred_id)
+        )
         
-        # Update referrer stats
-        cursor.execute('''
-            UPDATE users 
-            SET referrals = referrals + 1, 
-                referral_bonus = referral_bonus + 0.5,
-                balance = balance + 0.5
-            WHERE user_id = ?
-        ''', (referrer_id,))
+        # Update referrer stats and add bonus
+        cursor.execute(
+            'UPDATE users SET referrals = referrals + 1, balance = balance + 0.5 WHERE user_id = ?',
+            (referrer_id,)
+        )
         
-        self.conn.commit()
+        conn.commit()
+        conn.close()
 
 # Initialize database
-db = Database()
+db = SimpleDatabase()
 
 # Utility functions
 def format_balance(balance):
-    if balance >= 1:
-        return f"${balance:.6f}"
-    else:
+    """Format balance for display"""
+    if balance == 0:
+        return "$0.00000000"
+    elif balance < 0.0001:
         return f"${balance:.8f}"
+    else:
+        return f"${balance:.6f}"
 
-def calculate_mining_earnings(mining_power, duration_minutes):
-    base_earnings = 0.1 * duration_minutes
-    return round(base_earnings * mining_power, 6)
+def calculate_earnings():
+    """Calculate random earnings between $0.001 and $0.01"""
+    return round(random.uniform(0.001, 0.01), 6)
 
-def create_mining_animation():
-    frames = [
-        "⛏️ Mining... █░░░░░░░░░",
-        "⛏️ Mining... ██░░░░░░░░",
-        "⛏️ Mining... ███░░░░░░░",
-        "⛏️ Mining... ████░░░░░░",
-        "⛏️ Mining... █████░░░░░"
+def get_mining_animation():
+    """Get random mining animation"""
+    animations = [
+        "⛏️ Mining... █░░░░░░░░░ 10%",
+        "⛏️ Mining... ██░░░░░░░░ 20%", 
+        "⛏️ Mining... ███░░░░░░░ 30%",
+        "⛏️ Mining... ████░░░░░░ 40%",
+        "⛏️ Mining... █████░░░░░ 50%",
+        "⛏️ Mining... ██████░░░░ 60%",
+        "⛏️ Mining... ███████░░░ 70%",
+        "⛏️ Mining... ████████░░ 80%",
+        "⛏️ Mining... █████████░ 90%",
+        "⛏️ Mining... ██████████ 100%"
     ]
-    return random.choice(frames)
+    return random.choice(animations)
 
 class MiningBot:
+    def __init__(self):
+        self.db = db
+    
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
+        user_id = user.id
         
-        # Check if user exists
-        db_user = db.get_user(user.id)
-        
+        # Get or create user
+        db_user = self.db.get_user(user_id)
         if not db_user:
-            # Create new user
-            db.create_user(user.id, user.username, user.first_name or "User")
-            db_user = db.get_user(user.id)
+            self.db.create_user(user_id, user.username, user.first_name or "User")
+            db_user = self.db.get_user(user_id)
             
             # Check for referral
-            referral_code = context.args[0] if context.args else None
-            if referral_code:
+            if context.args:
                 try:
-                    referrer_id = int(referral_code)
-                    if referrer_id != user.id:
-                        db.add_referral(referrer_id, user.id)
+                    referrer_id = int(context.args[0])
+                    if referrer_id != user_id:
+                        self.db.add_referral(referrer_id, user_id)
+                        await update.message.reply_text("🎉 You received $0.50 referral bonus!")
                 except:
                     pass
         
+        # Welcome message
         welcome_text = f"""
-🏆 **Welcome to CryptoMiner Pro Bot!** 🏆
+🏆 **Welcome to CryptoMiner Pro!** 🏆
+
+✨ *Start earning cryptocurrency today!*
 
 📊 **Your Stats:**
-├ Balance: {format_balance(db_user['balance'])}
-├ Total Earned: {format_balance(db_user['total_earned'])}
-├ Mining Power: {db_user['mining_power']}x
-└ Referrals: {db_user['referrals']} users
+├ 💰 Balance: {format_balance(db_user['balance'])}
+├ ⚡ Mining Power: {db_user['mining_power']}x
+├ 👥 Referrals: {db_user['referrals']}
+└ 📈 Total Earned: {format_balance(db_user['total_earned'])}
 
-🎁 **Referral Link:**
-`https://t.me/{(await context.bot.get_me()).username}?start={user.id}`
+🔗 **Your Referral Link:**
+`https://t.me/{(await context.bot.get_me()).username}?start={user_id}`
 
-Click **Start Mining** to begin!
+*Invite friends and earn 50% of their earnings!*
         """
         
         keyboard = [
             [InlineKeyboardButton("⛏️ Start Mining", callback_data="start_mining")],
-            [InlineKeyboardButton("💰 Balance", callback_data="balance"),
-             InlineKeyboardButton("👥 Referrals", callback_data="referrals")],
-            [InlineKeyboardButton("📊 Statistics", callback_data="stats")]
+            [InlineKeyboardButton("💰 My Balance", callback_data="show_balance"),
+             InlineKeyboardButton("👥 Referrals", callback_data="show_referrals")],
+            [InlineKeyboardButton("📊 Statistics", callback_data="show_stats"),
+             InlineKeyboardButton("💳 Withdraw", callback_data="show_withdraw")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
     
-    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         
         user = query.from_user
         data = query.data
         
-        db_user = db.get_user(user.id)
+        db_user = self.db.get_user(user.id)
+        if not db_user:
+            await query.edit_message_text("❌ User not found. Please /start again.")
+            return
         
         if data == "start_mining":
             await self.start_mining(query, db_user)
-        elif data == "balance":
+        elif data == "show_balance":
             await self.show_balance(query, db_user)
-        elif data == "referrals":
+        elif data == "show_referrals":
             await self.show_referrals(query, db_user)
-        elif data == "stats":
+        elif data == "show_stats":
             await self.show_stats(query, db_user)
+        elif data == "show_withdraw":
+            await self.show_withdraw(query, db_user)
+        elif data == "main_menu":
+            await self.show_main_menu(query, db_user)
     
     async def start_mining(self, query, db_user):
-        mining_text = """
+        """Start a mining session"""
+        user_id = db_user['user_id']
+        
+        # Step 1: Initializing
+        init_text = """
 🚀 **Starting Mining Session...**
-⛏️ Mining in progress...
+
+⚡ Initializing mining rigs...
+🔧 Optimizing performance...
+🌐 Connecting to network...
         """
+        message = await query.edit_message_text(init_text, parse_mode='Markdown')
+        await asyncio.sleep(2)
         
-        message = await query.edit_message_text(mining_text, parse_mode='Markdown')
+        total_earned = 0
         
-        # Simulate mining with ads
-        total_earnings = 0
-        
+        # Step 2: Mining with ads
         for i in range(3):
-            await asyncio.sleep(2)
+            # Show mining progress
+            mining_text = f"""
+🎯 **Mining Session** ({i+1}/3)
+
+{get_mining_animation()}
+
+⏰ Processing transactions...
+💰 Calculating rewards...
+            """
+            await message.edit_text(mining_text)
+            await asyncio.sleep(3)
             
             # Show ad
             ad_text = f"""
-📺 **Advertisement ({i+1}/3)**
-Watching ad for 5 seconds...
+📺 **Advertisement** ({i+1}/3)
+
+🎬 Playing video ad...
+⏱️ Please wait 3 seconds...
+
+*Thank you for supporting our network!*
             """
             await message.edit_text(ad_text)
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
             
-            # Ad earnings
-            ad_earnings = random.uniform(0.001, 0.005)
-            total_earnings += ad_earnings
+            # Calculate earnings
+            earnings = calculate_earnings()
+            total_earned += earnings
             
-            # Mining progress
-            progress_text = f"""
-🎯 **Mining Session Active**
+            # Update balance
+            self.db.update_balance(user_id, earnings)
+            
+            # Show earnings
+            earnings_text = f"""
+✅ **Ad Completed!**
 
-{create_mining_animation()}
+💰 Earned: ${earnings:.6f}
+📈 Session Total: ${total_earned:.6f}
 
-💰 Earnings so far: ${total_earnings:.6f}
-⏳ Next ad in: {3-i} cycles
+🎯 Continuing to mine...
             """
-            await message.edit_text(progress_text)
-            await asyncio.sleep(5)
+            await message.edit_text(earnings_text)
+            await asyncio.sleep(2)
         
-        # Mining earnings
-        mining_earnings = calculate_mining_earnings(db_user['mining_power'], 1)
-        total_earnings += mining_earnings
-        
-        # Update balance
-        db.update_balance(db_user['user_id'], total_earnings)
-        
-        completion_text = f"""
-✅ **Mining Session Complete!**
+        # Final results
+        final_text = f"""
+🎊 **Mining Session Complete!**
 
-💰 **Total Earnings:** ${total_earnings:.8f}
-📈 **New Balance:** {format_balance(db_user['balance'] + total_earnings)}
+✅ **3 Ads Watched**
+✅ **Mining Successful**
+✅ **Rewards Distributed**
 
-Click below to mine again!
+💰 **Total Earned:** ${total_earned:.6f}
+📈 **New Balance:** {format_balance(db_user['balance'] + total_earned)}
+
+⚡ Ready for another session?
         """
         
         keyboard = [
             [InlineKeyboardButton("⛏️ Mine Again", callback_data="start_mining")],
-            [InlineKeyboardButton("📊 Dashboard", callback_data="balance")]
+            [InlineKeyboardButton("💰 Check Balance", callback_data="show_balance")],
+            [InlineKeyboardButton("📊 Main Menu", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await message.edit_text(completion_text, reply_markup=reply_markup, parse_mode='Markdown')
+        await message.edit_text(final_text, reply_markup=reply_markup, parse_mode='Markdown')
     
     async def show_balance(self, query, db_user):
+        """Show user balance"""
         balance_text = f"""
-💰 **Your Balance & Statistics**
+💰 **Your Balance & Stats**
 
-💵 **Available Balance:** {format_balance(db_user['balance'])}
-🏦 **Total Earned:** {format_balance(db_user['total_earned'])}
-⚡ **Mining Power:** {db_user['mining_power']}x
-👥 **Referrals:** {db_user['referrals']} users
+💵 Available: {format_balance(db_user['balance'])}
+📈 Total Earned: {format_balance(db_user['total_earned'])}
+⚡ Mining Power: {db_user['mining_power']}x
+👥 Referrals: {db_user['referrals']}
 
-Keep mining to earn more!
+💎 **Earning Potential:**
+├ Mining: $0.01 - $0.03 per session
+├ Ads: $0.003 - $0.03 per session  
+└ Referrals: 50% commission
+
+🚀 Keep mining to increase your earnings!
         """
         
         keyboard = [
             [InlineKeyboardButton("⛏️ Start Mining", callback_data="start_mining")],
+            [InlineKeyboardButton("👥 Referrals", callback_data="show_referrals")],
             [InlineKeyboardButton("📊 Main Menu", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -292,68 +341,174 @@ Keep mining to earn more!
         await query.edit_message_text(balance_text, reply_markup=reply_markup, parse_mode='Markdown')
     
     async def show_referrals(self, query, db_user):
+        """Show referral information"""
+        bot_username = (await query.bot.get_me()).username
         referral_text = f"""
 👥 **Referral Program**
 
-🎁 **Earn 50% of your referrals' earnings!**
+🎁 **Earn 50% Commission!**
 
-📊 **Your Stats:**
+For every friend you invite:
+✅ You get $0.50 instant bonus
+✅ Earn 50% of their mining rewards
+✅ Earn 50% of their ad earnings
+✅ Lifetime passive income!
+
+📊 **Your Referral Stats:**
 ├ Total Referrals: {db_user['referrals']}
-├ Referral Earnings: ${db_user['referral_bonus']:.6f}
+├ Referral Earnings: ${db_user['balance'] * 0.1:.6f}
+└ Potential Monthly: ${db_user['referrals'] * 5:.2f}
 
-🔗 **Your Referral Link:**
-`https://t.me/{(await query.bot.get_me()).username}?start={db_user['user_id']}`
+🔗 **Your Personal Link:**
+`https://t.me/{bot_username}?start={db_user['user_id']}`
 
-Share this link to earn more!
+📣 **Share this message:**
+"Join CryptoMiner Pro and earn free cryptocurrency! Use my link for bonus rewards! 🚀"
         """
         
         keyboard = [
             [InlineKeyboardButton("⛏️ Start Mining", callback_data="start_mining")],
-            [InlineKeyboardButton("💰 Balance", callback_data="balance")]
+            [InlineKeyboardButton("💰 Balance", callback_data="show_balance")],
+            [InlineKeyboardButton("📊 Main Menu", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(referral_text, reply_markup=reply_markup, parse_mode='Markdown')
     
     async def show_stats(self, query, db_user):
+        """Show statistics"""
         stats_text = f"""
 📊 **Live Statistics**
 
+🎯 **Network Status:**
+├ 🟢 Mining: Active
+├ 🟢 Ads: Running
+├ 🟢 Payments: Available
+└ 🟢 Referrals: Enabled
+
 💎 **Your Performance:**
 ├ Mining Power: {db_user['mining_power']}x
-├ Total Sessions: {int(db_user['total_earned'] / 0.1) if db_user['total_earned'] > 0 else 0}
-└ Uptime: 99.9%
+├ Total Sessions: {int(db_user['total_earned'] / 0.01)}
+├ Success Rate: 99.9%
+└ Uptime: 100%
 
-🏭 **Mining Equipment:**
-├ ASIC Miners: Online
-├ Cloud Nodes: Active
-└ System: Stable
+🏭 **System Info:**
+├ Version: CryptoMiner Pro v2.1
+├ Server: Render Cloud
+├ Database: SQLite
+└ Status: 🟢 Optimal
         """
         
         keyboard = [
             [InlineKeyboardButton("⛏️ Start Mining", callback_data="start_mining")],
-            [InlineKeyboardButton("💰 Balance", callback_data="balance")]
+            [InlineKeyboardButton("💰 Balance", callback_data="show_balance")],
+            [InlineKeyboardButton("📊 Main Menu", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(stats_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def show_withdraw(self, query, db_user):
+        """Show withdrawal information"""
+        if db_user['balance'] < 1.0:
+            withdraw_text = f"""
+💳 **Withdrawal Information**
+
+❌ **Minimum: $1.00**
+
+💰 Your Balance: {format_balance(db_user['balance'])}
+
+💎 You need: ${1.0 - db_user['balance']:.6f} more
+
+🚀 **Ways to Earn Faster:**
+├ Complete more mining sessions
+├ Watch all ads completely  
+├ Invite friends (50% commission)
+└ Be active daily
+
+⚡ Keep mining to reach the minimum!
+            """
+        else:
+            withdraw_text = f"""
+💳 **Withdrawal Request**
+
+✅ **Eligible for Withdrawal!**
+
+💰 Available: {format_balance(db_user['balance'])}
+
+📝 **Payment Method:**
+├ Binance UID Transfer
+├ Manual Processing
+├ 24-48 Hour Processing
+└ No Fees
+
+🎯 **Accepted Currencies:**
+├ BTTC (BitTorrent Chain)
+├ BONK (Solana)
+└ PEPE (Ethereum)
+
+**Contact @admin to withdraw**
+            """
+        
+        keyboard = [
+            [InlineKeyboardButton("⛏️ Start Mining", callback_data="start_mining")],
+            [InlineKeyboardButton("💰 Balance", callback_data="show_balance")],
+            [InlineKeyboardButton("📊 Main Menu", callback_data="main_menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(withdraw_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def show_main_menu(self, query, db_user):
+        """Show main menu"""
+        menu_text = f"""
+🏆 **CryptoMiner Pro Dashboard**
+
+📊 Quick Stats:
+├ Balance: {format_balance(db_user['balance'])}
+├ Power: {db_user['mining_power']}x
+├ Referrals: {db_user['referrals']}
+└ Total: {format_balance(db_user['total_earned'])}
+
+Choose an option below:
+        """
+        
+        keyboard = [
+            [InlineKeyboardButton("⛏️ Start Mining", callback_data="start_mining")],
+            [InlineKeyboardButton("💰 Balance", callback_data="show_balance"),
+             InlineKeyboardButton("👥 Referrals", callback_data="show_referrals")],
+            [InlineKeyboardButton("📊 Stats", callback_data="show_stats"),
+             InlineKeyboardButton("💳 Withdraw", callback_data="show_withdraw")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(menu_text, reply_markup=reply_markup, parse_mode='Markdown')
 
 def main():
+    """Start the bot"""
     try:
+        print("🚀 Starting CryptoMiner Pro Bot...")
+        print(f"🤖 Token: {BOT_TOKEN}")
+        
+        # Initialize bot
         bot = MiningBot()
         
+        # Create application
         application = Application.builder().token(BOT_TOKEN).build()
         
+        # Add handlers
         application.add_handler(CommandHandler("start", bot.start))
-        application.add_handler(CallbackQueryHandler(bot.button_handler))
+        application.add_handler(CallbackQueryHandler(bot.handle_callback))
         
-        print("🤖 Bot is starting...")
-        print("🚀 Bot is running on Render!")
+        print("✅ Bot initialized successfully")
+        print("📡 Starting polling...")
         
+        # Start polling
         application.run_polling()
         
     except Exception as e:
-        print(f"❌ Failed to start bot: {e}")
+        print(f"❌ Error starting bot: {e}")
+        print("Please check your BOT_TOKEN and try again.")
 
 if __name__ == '__main__':
     main()

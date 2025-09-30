@@ -42,4 +42,4 @@ Add these environment variables in Render dashboard:
 
 ```env
 BOT_TOKEN=7837389709:AAEue6M60TRpL7F1adZwsFhkrPx6awll6K4
-ADMIN_ID=YOUR_TELEGRAM_USER_ID
+ADMIN_ID=7837389709
